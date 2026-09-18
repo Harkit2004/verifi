@@ -1,0 +1,11 @@
+# Protected paths: changes need owner review (see docs/process/workflow.md)
+/AGENTS.md            @Harkit2004
+/CLAUDE.md            @Harkit2004
+/opencode.json        @Harkit2004
+/.opencode/           @Harkit2004
+/.github/             @Harkit2004
+/docs/architecture/   @Harkit2004
+/docs/adr/            @Harkit2004
+/docs/process/        @Harkit2004
+/scripts/agent/       @Harkit2004
+/scripts/verify.py    @Harkit2004

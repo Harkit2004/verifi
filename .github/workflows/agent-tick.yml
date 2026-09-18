@@ -1,0 +1,77 @@
+name: agent-tick
+
+# Runs one tick of the perpetual engineer (opencode) on GitHub-hosted runners.
+# Setup: docs/process/autonomous-runner.md. Requires secret AGENT_GH_TOKEN (PAT) and a provider API key.
+on:
+  workflow_dispatch:
+    inputs:
+      only:
+        description: "auto | merge | resume | work | triage | plan"
+        default: auto
+      issue:
+        description: "force a specific issue number (optional)"
+        default: ""
+  # schedule:
+  #   - cron: "*/30 * * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: agent-tick
+  cancel-in-progress: false
+
+jobs:
+  tick:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      GH_TOKEN: ${{ secrets.AGENT_GH_TOKEN }}
+      VERIFI_AGENT_MODEL: ${{ vars.VERIFI_AGENT_MODEL }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+    steps:
+      - name: Require token
+        run: |
+          if [ -z "$GH_TOKEN" ]; then echo "AGENT_GH_TOKEN secret is not set; see docs/process/autonomous-runner.md"; exit 1; fi
+
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.AGENT_GH_TOKEN }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: astral-sh/setup-uv@v6
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install opencode
+        run: npm install -g opencode-ai
+
+      - name: Git identity
+        run: |
+          git config user.name "verifi-agent"
+          git config user.email "verifi-agent@users.noreply.github.com"
+
+      - name: Tick
+        run: |
+          args="--only ${{ inputs.only || 'auto' }}"
+          if [ -n "${{ inputs.issue }}" ]; then args="$args --issue ${{ inputs.issue }}"; fi
+          python scripts/agent/tick.py $args
+
+      - name: Upload agent logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-${{ github.run_id }}
+          path: |
+            .agent/
+            .verification/
+          retention-days: 30
+          include-hidden-files: true
