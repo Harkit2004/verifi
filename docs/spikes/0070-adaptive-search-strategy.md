@@ -64,9 +64,10 @@ Concretely:
    search (INV-1). Severity may weight the reward later; the MVP uses binary success.
 3. **Policy is code, deterministic, and batched.** A policy answers
    `select(tree, eligible, width) -> arms[]` (`()` = stop). MVP algorithm: UCB1 with deterministic
-   tie-breaking; the RNG is seeded from `spec.attacks.seed`. Evaluating a batch of `width` arms is one
-   round, matching the method's cost model (reward the best success, penalise episodes spent, reward
-   batching).
+   tie-breaking. `AdaptiveLoop.search(seed=...)` receives `spec.attacks.seed` and it is the **sole**
+   source that seeds `BanditPolicy.rng`, so one seed fixes the whole search (INV-7). Evaluating a batch of
+   `width` arms is one round, matching the method's cost model (reward the best success, penalise episodes
+   spent, reward batching).
 4. **Record the search tree.** Every attempt is a node
    `(parent, arm, seed, episode_id, success, control_ids, evidence_ids, steps, tokens)`, persisted under
    the run directory. This is the replay substrate; the MVP does not yet improve the policy offline.
@@ -84,6 +85,7 @@ Concretely:
 | Testable without infrastructure | yes (`FakeSandbox` + `ScriptedTarget`) | yes | no (endpoint + network + new dependency) | no |
 | Expressiveness | limited to existing cases × mutators | high over payload space | highest (semantic, multi-turn) | high |
 | Verdict integrity | reward is a `SuccessPredicate` over trusted evidence | same | same, but feedback must stay trusted-only and never leak payloads (INV-6) | same |
+| Endpoint exposure | none | none | private payloads reach the model endpoint (`PRIVATE_PACK_REMOTE_TARGET`) | private payloads reach the endpoint |
 
 The decisive constraints are determinism, offline testability, and budget. With the current attack model
 the candidate space is a small finite set, so the bandit is near-optimal *and* provably reaches any
@@ -107,7 +109,9 @@ and the loop, reward, and evidence path are unchanged.
   that provisions once and runs a supplied episode list (Part B). Without it #71 would either re-provision
   a sandbox per attempt or duplicate orchestrator logic.
 - Phase 3b adds a `Proposer` (LLM/evolutionary) as an alternative policy. It must stay outside the verdict
-  path and must not put private payloads into reports/logs (INV-6).
+  path, must not put private payloads into reports/logs/events/findings (INV-6), and — unlike a local
+  mutator — sends payloads to a model endpoint, which is the accepted `PRIVATE_PACK_REMOTE_TARGET`
+  limitation; private packs therefore need a trusted endpoint.
 - No new runtime dependency is introduced by this decision (`random` is stdlib).
 
 ## Alternatives rejected
@@ -140,14 +144,16 @@ once accepted.
 
 # models.py
 class Arm(BaseModel):
-    id: str                               # materialized case id: case_id or "case~mut1~mut2~n"
+    id: str                               # AUTHORITATIVE materialized case id: "case~mut1~mut2~n" (or case)
     case_id: str                          # source case
     mutator_ids: tuple[str, ...] = ()     # () = the unmutated case (control arm)
+    variant: int = 0                      # per-mutator variant index n; for chains, `id` is authoritative
     seed: int
 
 class Attempt(BaseModel):                 # one node of the search tree
-    id: str                               # "att_" + sha256_json({parent_id, arm.id, seed})[:24]
+    id: str                               # "att_" + sha256_json({parent_id, arm.id, seed, ordinal})[:24]
     parent_id: str | None
+    ordinal: int                          # pull index of this arm under `parent_id` (0-based) — keeps ids unique
     arm: Arm
     episode_id: str | None
     success: bool                         # SuccessPredicate match over TRUSTED evidence only
@@ -188,6 +194,7 @@ class AdaptiveLoop:
                  regression_store: RegressionStore) -> None: ...
     def search(self, locked: LockedSpec, *, seed: int, width: int = 4,
                max_episodes: int | None = None) -> AdaptiveResult: ...
+    # `seed` IS spec.attacks.seed and the sole seed for policy.rng and arm materialization (INV-7);
     # writes run_dir/adaptive/tree.json and adaptive/result.json; exports successes via #69
 
 # operations.py
@@ -201,8 +208,10 @@ provisioning:
 class Orchestrator:
     def run_episodes(self, locked: LockedSpec, *, scenarios: Sequence[Scenario],
                      sandbox: Sandbox | None = None) -> tuple[list[EpisodeResult], EvidenceView]: ...
-    # provisions once when sandbox is None; runs exactly the supplied scenarios; returns results and the
-    # trusted evidence view. run() delegates to it, so existing behavior and tests are unchanged.
+    # provisions once when sandbox is None and OWNS teardown of any sandbox it creates (destroy in
+    # `finally`, INV-10); a caller-supplied sandbox is left for the caller to destroy. Runs exactly the
+    # supplied scenarios; returns results and the trusted evidence view. run() delegates to it, so
+    # existing behavior and tests are unchanged.
 ```
 
 The reward is computed by the existing `injection` detector over that `EvidenceView` (build a
